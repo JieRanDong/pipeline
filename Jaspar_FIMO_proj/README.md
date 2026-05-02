@@ -1,0 +1,1 @@
+可以下载任何数据库的non-redundant PFMs（positon frequency matrix），转换成meme格式，利用meme下面的FIMO软件进行某段长序列的motif扫描
