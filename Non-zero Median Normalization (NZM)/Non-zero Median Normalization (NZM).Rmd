@@ -1,0 +1,101 @@
+---
+title: "Untitled"
+author: "John"
+date: "2026-05-06"
+output: html_document
+---
+
+```{r}
+df <- read.csv("../result/Signal_matrix.txt",sep = '\t')
+
+row.names(df) <- df[,"X"]
+
+df <- df[,-1]
+```
+
+```{r}
+
+nonzero_median_normalize <- function(data) {
+  
+  medians <- apply(data, 2, function(col) {
+    
+    nonzero_vals <- col[col > 0]
+    
+    if (length(nonzero_vals) == 0) {
+      warning("Sample ", col, " has no positive values. Median set to NA.")
+      return(NA)
+    }
+    median(nonzero_vals)
+  })
+  
+  if (any(is.na(medians))) {
+    stop("Some samples have no positive values. Remove them before normalization.")
+  }
+  
+  medians_mean <- mean(medians)
+  
+  norm_data <- sweep(data, 2, medians, FUN = "/") * medians_mean
+
+  return(norm_data)
+}
+```
+
+$$
+x = [x_{ij}]. \quad i=1, \dots, n \text{ ( character )}， \quad j =1,\dots,p\text{ ( sample number )} \tag{1}
+$$
+$$
+m_j = \operatorname{median}\big({x_ij} \mid {x_ij} > 0\big)\tag{2}
+$$
+$$
+\bar{m} = \frac{\sum_{j=1}^p m_j}{p}\tag{3}
+$$
+$$
+x'_{ij} = \frac{x_{ij}}{m_j} \times \overline{m}\tag{4}
+$$
+
+```{r}
+
+df_ck <- df[,c("Parental_1","Parental_2")]
+df_treat <- df[,c("Resistant_1","Resistant_2")]
+
+df_norm_ck <- nonzero_median_normalize(df_ck)
+df_norm_treat <- nonzero_median_normalize(df_treat)
+
+df_norm <- cbind(df_norm_ck,df_norm_treat) %>% 
+  as.matrix()
+```
+
+```{r heatmap}
+library(ComplexHeatmap)
+library(magrittr)
+
+# normalization
+samples <- rep(c('Parental','Resistant'), c(2,2))
+
+for (i in 1:nrow(df_norm)) {
+  df_norm[i, ] <- scale(log(unlist(df_norm[i, ] + 1), 2))
+}
+
+# 基础图
+
+p1 <- Heatmap(df_norm,
+              col = colorRampPalette(c("navy","blue","white","pink","red"))(100),
+              show_row_names = TRUE,
+              column_names_rot = 45,
+              row_names_gp = gpar(fontsize = 10),
+              heatmap_legend_param = list(title = ""),
+              rect_gp = gpar(col = "grey", lwd = 0.5),
+              top_annotation = HeatmapAnnotation(Group = samples, 
+                                                 simple_anno_size = unit(2, 'mm'), 
+                                                 col = list(Group = c('Parental' = '#00DAE0',
+                                                                      'Resistant' = '#FF9289')),
+                                                 show_annotation_name = FALSE))
+p1
+```
+
+```{r saving}
+
+pdf("heatmap_TF.pdf",width = 8.25,height = 7.83)
+p1
+dev.off()
+```
