@@ -1,0 +1,261 @@
+---
+title: "Untitled"
+author: "John"
+date: "2026-04-10"
+output: html_document
+---
+
+```{r}
+library(rbioapi)
+library(dplyr)
+```
+
+```{r}
+gene <- read.table("../gene_symbol_human_Newest.txt",header = F) %>%
+  as.data.frame()
+genes <- gene$V1
+```
+
+### acquire accession
+
+```{r}
+
+library(queryup)
+library(dplyr)
+library(tidyr)
+
+# read symbol id list
+gene <- read.table("../gene_symbol_human_Newest.txt", header = FALSE, stringsAsFactors = FALSE)
+genes <- gene$V1
+
+# construct requirement
+query <- list(
+  "gene_exact" = genes,
+  "organism_id" = "9606",
+  "reviewed" = "true"
+)
+
+# running for uniprot id
+results <- query_uniprot(query = query, show_progress = TRUE)
+print(names(results))
+
+# make sure the column of Gene.Names exists
+gene_names_col <- grep("Gene.Names", names(results), value = TRUE)[1]
+if (is.na(gene_names_col)) {
+  stop("haven't found the column of Gene.Names")
+}
+
+# get the gene name
+results <- results %>%
+  mutate(Main_Gene = sapply(strsplit(as.character(.data[[gene_names_col]]), "[ ;]"), `[`, 1))
+
+
+# make up the final data-frame
+input_df <- data.frame(Input_Gene = genes, stringsAsFactors = FALSE)
+
+output <- input_df %>%
+  left_join(results, by = c("Input_Gene" = "Main_Gene")) %>%
+  select(Entry, Input_Gene, everything()) # adjust the rank of column
+
+head(output)
+```
+
+### family annotation
+
+```{r}
+
+get_uniprot_families_safe <- function(accession_ids, batch_size = 50) {
+  # import package
+  if (!requireNamespace("httr", quietly = TRUE)) {
+    stop("No package called 'httr' found \n install.packages('httr')")
+  }
+  
+  all_results <- list()
+  
+  for (i in seq_along(accession_ids)) {
+    current_id <- accession_ids[i]
+    
+    # Construct a URL that only queries the current single ID
+    query_string <- paste0("accession:", current_id)
+    query_encoded <- URLencode(query_string, reserved = TRUE)
+    full_url <- paste0(
+      "https://rest.uniprot.org/uniprotkb/search?query=", query_encoded,
+      "&format=tsv&fields=accession,protein_families"
+    )
+    
+    # send commitment
+    response <- tryCatch({
+      httr::RETRY("GET", url = full_url, times = 3, pause_base = 1, quiet = TRUE)
+    }, error = function(e) {
+      return(NULL)
+    })
+    
+    # Populate the list based on the response results
+    if (!is.null(response) && httr::status_code(response) == 200) {
+      content_text <- httr::content(response, "text", encoding = "UTF-8")
+      batch_data <- tryCatch({
+        read.delim(text = content_text, sep = "\t", header = TRUE, stringsAsFactors = FALSE, quote = "")
+      }, error = function(e) {
+        return(NULL)
+      })
+      
+      if (!is.null(batch_data) && nrow(batch_data) > 0) {
+
+        if ("Entry" %in% names(batch_data)) {
+          names(batch_data)[names(batch_data) == "Entry"] <- "Accession"
+        }
+        if ("Protein.families" %in% names(batch_data)) {
+          names(batch_data)[names(batch_data) == "Protein.families"] <- "Protein_families"
+        }
+        
+        # make sure the column needing exists
+        if ("Accession" %in% names(batch_data) && "Protein_families" %in% names(batch_data)) {
+          all_results[[i]] <- data.frame(
+            Input_Accession = current_id,
+            Accession = batch_data$Accession[1],
+            Protein_families = batch_data$Protein_families[1],
+            stringsAsFactors = FALSE
+          )
+        } else {
+          # mark false if column unexists
+          all_results[[i]] <- data.frame(
+            Input_Accession = current_id,
+            Accession = NA_character_,
+            Protein_families = NA_character_,
+            stringsAsFactors = FALSE
+          )
+        }
+      }
+    }
+  }
+    # requirement delay
+    Sys.sleep(0.2)
+    
+    # print process
+    if (i %% 50 == 0) {
+      cat(sprintf("%d / %d ID processed...\n", i, length(accession_ids)))
+    }
+  
+  final_results <- do.call(rbind, all_results)
+  return(final_results)
+  
+}
+```
+
+### superfamily annotation
+
+```{r}
+
+get_uniprot_superfamily_safe <- function(accession_ids, batch_size = 50) {
+ 
+  all_results <- list()
+  
+  for (i in seq_along(accession_ids)) {
+    current_id <- accession_ids[i]
+    
+    # access the SUPERFAMILY info from family_and_domains
+    query_string <- paste0("accession:", current_id)
+    query_encoded <- URLencode(query_string, reserved = TRUE)
+    full_url <- paste0(
+      "https://rest.uniprot.org/uniprotkb/search?query=", query_encoded,
+      "&format=tsv&fields=accession,family_and_domains"
+    )
+    
+    response <- tryCatch({
+      httr::RETRY("GET", url = full_url, times = 3, pause_base = 1, quiet = TRUE)
+    }, error = function(e) NULL)
+    
+    superfamily_text <- NA_character_
+    uniprot_acc <- NA_character_
+    
+    if (!is.null(response) && httr::status_code(response) == 200) {
+      content_text <- httr::content(response, "text", encoding = "UTF-8")
+      batch_data <- tryCatch({
+        read.delim(text = content_text, sep = "\t", header = TRUE, stringsAsFactors = FALSE, quote = "")
+      }, error = function(e) NULL)
+      
+      if (!is.null(batch_data) && nrow(batch_data) > 0) {
+
+        if ("Entry" %in% names(batch_data)) {
+          names(batch_data)[names(batch_data) == "Entry"] <- "Accession"
+        }
+        # it'll be "Family.and.domains" or "Family and domains"
+        fam_col <- grep("family.*domain", names(batch_data), ignore.case = TRUE, value = TRUE)
+        if (length(fam_col) > 0) {
+          fam_text <- batch_data[1, fam_col[1]]
+          if (!is.na(fam_text) && nzchar(fam_text)) {
+            # grep the row starting with "SUPERFAMILY"
+            # "SUPERFAMILY: SSF...  description"）
+            lines <- strsplit(fam_text, "; ")[[1]]
+            super_lines <- grep("^SUPERFAMILY", lines, value = TRUE, ignore.case = FALSE)
+            if (length(super_lines) > 0) {
+              superfamily_text <- paste(super_lines, collapse = "; ")
+            }
+          }
+          uniprot_acc <- batch_data[1, "Accession"]
+        }
+      }
+    }
+    
+    all_results[[i]] <- data.frame(
+      Input_Accession = current_id,
+      Accession = uniprot_acc,
+      Superfamily_info = superfamily_text,
+      stringsAsFactors = FALSE
+    )
+    
+    Sys.sleep(0.2)
+    if (i %% 50 == 0) cat(sprintf("%d / %d ID processed...\n", i, length(accession_ids)))
+  }
+  
+  final_results <- do.call(rbind, all_results)
+  return(final_results)
+}
+```
+
+### running
+
+```{r}
+
+accession_list <- results$Entry
+
+# family acquire
+
+## Running Function
+family_info_full <- get_uniprot_families_safe(accession_list)
+head(family_info_full)
+
+## check missing ID
+missing_ids <- family_info_full$Input_Accession[is.na(family_info_full$Accession)]
+print(missing_ids)
+
+
+
+# superfamily acquire
+
+# Running Function
+superfamily_info_full <- get_uniprot_superfamily_safe(accession_list)
+head(superfamily_info_full)
+
+# check missing ID
+missing_super <- superfamily_info_full$Input_Accession[is.na(superfamily_info_full$Superfamily_info)]
+print(missing_super)
+
+
+merged_df <- merge(output, 
+                   family_info_full, 
+                   by.x = "Entry", 
+                   by.y = "Input_Accession", 
+                   all.x = TRUE) %>% 
+  merge(.,
+        superfamily_info_full,
+        by.x = "Entry",
+         by.y = "Input_Accession", 
+                   all.x = TRUE) %>% 
+  # keep other info with parameter in select: everything()
+  select(Entry, Input_Gene, Protein_families, Superfamily_info) 
+
+head(merged_df)
+
+write.csv(merged_df,"family_info.csv",quote = F)
+```
